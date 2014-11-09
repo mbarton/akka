@@ -13,8 +13,8 @@ import scala.concurrent.duration._
 import akka.actor.{ Props, ActorRefFactory, ActorRef }
 import akka.stream.{ TransformerLike, MaterializerSettings }
 import akka.stream.FlowMaterializer
-import akka.stream.impl.{ ActorProcessorFactory, TransformProcessorImpl, StreamSupervisor, ActorBasedFlowMaterializer }
-import akka.stream.impl.Ast.{ Transform, Fusable, AstNode }
+import akka.stream.impl._
+import akka.stream.impl.Ast._
 import akka.stream.testkit.{ StreamTestKit, AkkaSpec }
 import akka.stream.testkit.ChainSetup
 import akka.testkit._
@@ -68,13 +68,24 @@ object FlowSpec {
     supervisor: ActorRef,
     flowNameCounter: AtomicLong,
     namePrefix: String,
-    brokenMessage: Any) extends ActorBasedFlowMaterializer(settings, supervisor, flowNameCounter, namePrefix) {
+    optimizations: Optimizations,
+    brokenMessage: Any) extends ActorBasedFlowMaterializer(settings, supervisor, flowNameCounter, namePrefix, optimizations) {
 
-    override def processorForNode(op: AstNode, flowName: String, n: Int): Processor[Any, Any] = {
+    override def processorForNode[In, Out](op: AstNode, flowName: String, n: Int): Processor[In, Out] = {
       val props = op match {
-        case t: Transform ⇒ Props(new BrokenTransformProcessorImpl(settings, t.mkTransformer(), brokenMessage))
-        case f: Fusable   ⇒ Props(new BrokenActorInterpreter(settings, f.ops, brokenMessage)).withDispatcher(settings.dispatcher)
-        case o            ⇒ ActorProcessorFactory.props(this, o)
+        case t: Transform   ⇒ Props(new BrokenTransformProcessorImpl(settings, t.mkTransformer(), brokenMessage))
+        case f: Fused       ⇒ Props(new BrokenActorInterpreter(settings, f.ops, brokenMessage)).withDispatcher(settings.dispatcher)
+        case Map(f)         ⇒ Props(new BrokenActorInterpreter(settings, List(fusing.Map(f)), brokenMessage))
+        case Filter(p)      ⇒ Props(new BrokenActorInterpreter(settings, List(fusing.Filter(p)), brokenMessage))
+        case Drop(n)        ⇒ Props(new BrokenActorInterpreter(settings, List(fusing.Drop(n)), brokenMessage))
+        case Take(n)        ⇒ Props(new BrokenActorInterpreter(settings, List(fusing.Take(n)), brokenMessage))
+        case Collect(pf)    ⇒ Props(new BrokenActorInterpreter(settings, List(fusing.Collect(pf)), brokenMessage))
+        case Scan(z, f)     ⇒ Props(new BrokenActorInterpreter(settings, List(fusing.Scan(z, f)), brokenMessage))
+        case Expand(s, f)   ⇒ Props(new BrokenActorInterpreter(settings, List(fusing.Expand(s, f)), brokenMessage))
+        case Conflate(s, f) ⇒ Props(new BrokenActorInterpreter(settings, List(fusing.Conflate(s, f)), brokenMessage))
+        case Buffer(n, s)   ⇒ Props(new BrokenActorInterpreter(settings, List(fusing.Buffer(n, s)), brokenMessage))
+        case MapConcat(f)   ⇒ Props(new BrokenActorInterpreter(settings, List(fusing.MapConcat(f)), brokenMessage))
+        case o              ⇒ ActorProcessorFactory.props(this, o)
       }
       val impl = actorOf(props, s"$flowName-$n-${op.name}")
       ActorProcessorFactory(impl)
@@ -87,6 +98,7 @@ object FlowSpec {
       context.actorOf(StreamSupervisor.props(settings).withDispatcher(settings.dispatcher)),
       flowNameCounter,
       "brokenflow",
+      Optimizations.none,
       brokenMessage)
   }
 }

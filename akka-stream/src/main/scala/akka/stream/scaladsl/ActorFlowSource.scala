@@ -51,14 +51,12 @@ sealed trait ActorFlowSource[+Out] extends Source[Out] {
 
   override type Repr[+O] = SourcePipe[O]
 
-  private def sourcePipe = Pipe.empty[Out].withSource(this)
+  override def via[T](flow: Flow[Out, T]): Source[T] = Pipe.empty[Out].withSource(this).via(flow)
 
-  override def via[T](flow: Flow[Out, T]): Source[T] = sourcePipe.via(flow)
-
-  override def to(sink: Sink[Out]): RunnableFlow = sourcePipe.to(sink)
+  override def to(sink: Sink[Out]): RunnableFlow = Pipe.empty[Out].withSource(this).to(sink)
 
   /** INTERNAL API */
-  override private[scaladsl] def andThen[U](op: AstNode) = SourcePipe(this, List(op))
+  override private[scaladsl] def andThen[U](op: AstNode) = SourcePipe(this, List(op)) //FIXME raw addition of AstNodes
 }
 
 /**

@@ -294,6 +294,15 @@ class Source[+Out](delegate: scaladsl.Source[Out]) {
     new Source(delegate.grouped(n).map(_.asJava))
 
   /**
+   * Similar to `fold` but is not a terminal operation,
+   * emits its current value which starts at `zero` and then
+   * applies the current and next value to the given function `f`,
+   * yielding the next current value.
+   */
+  def scan[T](zero: T)(f: japi.Function2[T, Out, T]): javadsl.Source[T] =
+    new Source(delegate.scan(zero)(f.apply))
+
+  /**
    * Chunk up this stream into groups of elements received within a time window,
    * or limited by the given number of elements, whatever happens first.
    * Empty groups will not be emitted if no elements are received from upstream.
