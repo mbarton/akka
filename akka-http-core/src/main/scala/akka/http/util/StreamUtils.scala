@@ -11,11 +11,14 @@ import org.reactivestreams.{ Subscriber, Publisher }
 
 import scala.collection.immutable
 import scala.concurrent.{ ExecutionContext, Future }
+import akka.stream.impl.fusing.DeterministicOp
+import akka.stream.impl.fusing.Directive
+import akka.stream.impl.fusing.Context
 
 import akka.actor.Props
 import akka.util.ByteString
 
-import akka.stream.{ impl, Transformer, FlowMaterializer }
+import akka.stream.{ impl, FlowMaterializer }
 import akka.stream.scaladsl._
 
 import akka.http.model.RequestEntity
@@ -24,55 +27,37 @@ import akka.http.model.RequestEntity
  * INTERNAL API
  */
 private[http] object StreamUtils {
-  /**
-   * Maps a transformer by strictly applying the given function to each output element.
-   */
-  def mapTransformer[T, U, V](t: Transformer[T, U], f: U ⇒ V): Transformer[T, V] =
-    new Transformer[T, V] {
-      override def isComplete: Boolean = t.isComplete
-
-      def onNext(element: T): immutable.Seq[V] = t.onNext(element).map(f)
-      override def onTermination(e: Option[Throwable]): immutable.Seq[V] = t.onTermination(e).map(f)
-      override def onError(cause: Throwable): Unit = t.onError(cause)
-      override def cleanup(): Unit = t.cleanup()
-    }
 
   /**
    * Creates a transformer that will call `f` for each incoming ByteString and output its result. After the complete
    * input has been read it will call `finish` once to determine the final ByteString to post to the output.
    */
-  def byteStringTransformer(f: ByteString ⇒ ByteString, finish: () ⇒ ByteString): Transformer[ByteString, ByteString] =
-    new Transformer[ByteString, ByteString] {
-      def onNext(element: ByteString): immutable.Seq[ByteString] = f(element) :: Nil
-
-      override def onTermination(e: Option[Throwable]): immutable.Seq[ByteString] =
-        if (e.isEmpty) {
-          val last = finish()
-          if (last.nonEmpty) last :: Nil
-          else Nil
-        } else super.onTermination(e)
+  def byteStringTransformer(f: ByteString ⇒ ByteString, finish: () ⇒ ByteString): ByteStringTransformer =
+    new ByteStringTransformer {
+      override def onNext(element: ByteString): ByteString = f(element)
+      override def onComplete(): ByteString = finish()
     }
 
   def failedPublisher[T](ex: Throwable): Publisher[T] =
     impl.ErrorPublisher(ex).asInstanceOf[Publisher[T]]
 
-  def mapErrorTransformer[T](f: Throwable ⇒ Throwable): Transformer[T, T] =
-    new Transformer[T, T] {
-      def onNext(element: T): immutable.Seq[T] = immutable.Seq(element)
-      override def onError(cause: scala.Throwable): Unit = throw f(cause)
+  def mapErrorTransformer(f: Throwable ⇒ Throwable): ByteStringTransformer =
+    new ByteStringTransformer {
+      override def onNext(element: ByteString): ByteString = element
+      override def onError(cause: Throwable): Throwable = f(cause)
     }
 
-  def sliceBytesTransformer(start: Long, length: Long): Transformer[ByteString, ByteString] =
-    new Transformer[ByteString, ByteString] {
-      type State = Transformer[ByteString, ByteString]
+  def sliceBytesTransformer(start: Long, length: Long): ByteStringTransformer =
+    new ByteStringTransformer {
+      type State = ByteStringTransformer
 
       def skipping = new State {
         var toSkip = start
-        def onNext(element: ByteString): immutable.Seq[ByteString] =
+        override def onNext(element: ByteString): ByteString =
           if (element.length < toSkip) {
             // keep skipping
             toSkip -= element.length
-            Nil
+            ByteStringTransformer.NoElement
           } else {
             become(taking(length))
             // toSkip <= element.length <= Int.MaxValue
@@ -81,16 +66,16 @@ private[http] object StreamUtils {
       }
       def taking(initiallyRemaining: Long) = new State {
         var remaining: Long = initiallyRemaining
-        def onNext(element: ByteString): immutable.Seq[ByteString] = {
+        override def onNext(element: ByteString): ByteString = {
           val data = element.take(math.min(remaining, Int.MaxValue).toInt)
           remaining -= data.size
           if (remaining <= 0) become(finishing)
-          data :: Nil
+          data
         }
       }
       def finishing = new State {
         override def isComplete: Boolean = true
-        def onNext(element: ByteString): immutable.Seq[ByteString] =
+        override def onNext(element: ByteString): ByteString =
           throw new IllegalStateException("onNext called on complete stream")
       }
 
@@ -98,28 +83,28 @@ private[http] object StreamUtils {
       def become(state: State): Unit = currentState = state
 
       override def isComplete: Boolean = currentState.isComplete
-      def onNext(element: ByteString): immutable.Seq[ByteString] = currentState.onNext(element)
-      override def onTermination(e: Option[Throwable]): immutable.Seq[ByteString] = currentState.onTermination(e)
+      override def onNext(element: ByteString): ByteString = currentState.onNext(element)
+      override def onComplete(): ByteString = currentState.onComplete()
     }
 
   /**
    * Applies a sequence of transformers on one source and returns a sequence of sources with the result. The input source
    * will only be traversed once.
    */
-  def transformMultiple[T, U](input: Source[T], transformers: immutable.Seq[() ⇒ Transformer[T, U]])(implicit materializer: FlowMaterializer): immutable.Seq[Source[U]] =
+  def transformMultiple(input: Source[ByteString], transformers: immutable.Seq[() ⇒ ByteStringTransformer])(implicit materializer: FlowMaterializer): immutable.Seq[Source[ByteString]] =
     transformers match {
       case Nil      ⇒ Nil
-      case Seq(one) ⇒ Vector(input.transform("transformMultipleElement", one))
+      case Seq(one) ⇒ Vector(input.transform("transformMultipleElement", () ⇒ ByteStringTransformerOp(one())))
       case multiple ⇒
-        val results = Vector.fill(multiple.size)(Sink.publisher[U])
+        val results = Vector.fill(multiple.size)(Sink.publisher[ByteString])
         val mat =
           FlowGraph { implicit b ⇒
             import FlowGraphImplicits._
 
-            val broadcast = Broadcast[T]("transformMultipleInputBroadcast")
+            val broadcast = Broadcast[ByteString]("transformMultipleInputBroadcast")
             input ~> broadcast
             (multiple, results).zipped.foreach { (trans, sink) ⇒
-              broadcast ~> Flow[T].transform("transformMultipleElement", trans) ~> sink
+              broadcast ~> Flow[ByteString].transform("transformMultipleElement", () ⇒ ByteStringTransformerOp(trans())) ~> sink
             }
           }.run()
         results.map(s ⇒ Source(mat.get(s)))
@@ -191,16 +176,66 @@ private[http] object StreamUtils {
 /**
  * INTERNAL API
  */
-private[http] class EnhancedTransformer[T, U](val t: Transformer[T, U]) extends AnyVal {
-  def map[V](f: U ⇒ V): Transformer[T, V] = StreamUtils.mapTransformer(t, f)
-}
-
-/**
- * INTERNAL API
- */
 private[http] class EnhancedByteStringSource(val byteStringStream: Source[ByteString]) extends AnyVal {
   def join(implicit materializer: FlowMaterializer): Future[ByteString] =
     byteStringStream.fold(ByteString.empty)(_ ++ _)
   def utf8String(implicit materializer: FlowMaterializer, ec: ExecutionContext): Future[String] =
     join.map(_.utf8String)
 }
+
+object ByteStringTransformer {
+  val NoElement: ByteString = null
+
+  def join(a: ByteString, b: ByteString): ByteString = {
+    val a2 = if (a eq NoElement) ByteString.empty else a
+    if (b eq NoElement) a2
+    else a2 ++ b
+  }
+
+  def noElementAsEmpty(elem: ByteString): ByteString =
+    if (elem eq NoElement) ByteString.empty else elem
+}
+
+abstract class ByteStringTransformer {
+  import ByteStringTransformer.NoElement
+  def onNext(element: ByteString): ByteString
+  def isComplete: Boolean = false
+  def onComplete(): ByteString = NoElement
+  def onError(cause: Throwable): Throwable = cause
+}
+
+/**
+ * INTERNAL API
+ */
+private[http] final case class ByteStringTransformerOp(transformer: ByteStringTransformer) extends DeterministicOp[ByteString, ByteString] {
+  import ByteStringTransformer.NoElement
+
+  private var completed = false
+
+  override def onPush(elem: ByteString, ctxt: Context[ByteString]): Directive = {
+    val transformed = transformer.onNext(elem)
+    completed = transformer.isComplete
+    if ((transformed eq NoElement) && completed) ctxt.finish()
+    else if (transformed eq NoElement) ctxt.pull()
+    else if (completed) ctxt.pushAndFinish(elem)
+    else ctxt.push(transformed)
+  }
+
+  override def onPull(ctxt: Context[ByteString]): Directive = {
+    if (isFinishing || completed) {
+      val trailer = transformer.onComplete()
+      if (trailer eq NoElement) ctxt.finish()
+      else ctxt.pushAndFinish(trailer)
+
+    } else {
+      ctxt.pull()
+    }
+  }
+
+  override def onFailure(cause: Throwable, ctxt: Context[ByteString]): Directive =
+    ctxt.fail(transformer.onError(cause))
+
+  override def onUpstreamFinish(ctxt: Context[ByteString]): Directive =
+    ctxt.absorbTermination()
+}
+

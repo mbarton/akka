@@ -8,7 +8,7 @@ import language.implicitConversions
 import language.higherKinds
 import java.nio.charset.Charset
 import com.typesafe.config.Config
-import akka.stream.{ FlowMaterializer, FlattenStrategy, Transformer }
+import akka.stream.{ FlowMaterializer, FlattenStrategy }
 import akka.stream.scaladsl.{ Flow, Source }
 import scala.concurrent.duration.Duration
 import scala.concurrent.{ Await, Future }
@@ -18,6 +18,9 @@ import akka.event.LoggingAdapter
 import akka.util.ByteString
 import akka.actor._
 import scala.collection.immutable
+import akka.stream.impl.fusing.Context
+import akka.stream.impl.fusing.Directive
+import akka.stream.impl.fusing.TransitivePullOp
 
 package object util {
   private[http] val UTF8 = Charset.forName("UTF8")
@@ -41,8 +44,6 @@ package object util {
     new EnhancedByteStringTraversableOnce(byteStrings)
   private[http] implicit def enhanceByteStrings(byteStrings: Source[ByteString]): EnhancedByteStringSource =
     new EnhancedByteStringSource(byteStrings)
-  private[http] implicit def enhanceTransformer[T, U](transformer: Transformer[T, U]): EnhancedTransformer[T, U] =
-    new EnhancedTransformer(transformer)
 
   private[http] implicit class SourceWithHeadAndTail[T](val underlying: Source[Source[T]]) extends AnyVal {
     def headAndTail: Source[(T, Source[T])] =
@@ -59,14 +60,18 @@ package object util {
   private[http] implicit class EnhancedSource[T](val underlying: Source[T]) {
     def printEvent(marker: String): Source[T] =
       underlying.transform("transform",
-        () ⇒ new Transformer[T, T] {
-          def onNext(element: T) = {
+        () ⇒ new TransitivePullOp[T, T] {
+          override def onPush(element: T, ctxt: Context[T]): Directive = {
             println(s"$marker: $element")
-            element :: Nil
+            ctxt.push(element)
           }
-          override def onTermination(e: Option[Throwable]) = {
-            println(s"$marker: Terminated with error $e")
-            Nil
+          override def onFailure(cause: Throwable, ctxt: Context[T]): Directive = {
+            println(s"$marker: Failure $cause")
+            super.onFailure(cause, ctxt)
+          }
+          override def onUpstreamFinish(ctxt: Context[T]): Directive = {
+            println(s"$marker: Terminated")
+            super.onUpstreamFinish(ctxt)
           }
         })
 
@@ -90,10 +95,13 @@ package object util {
     }
   }
 
-  private[http] def errorLogger(log: LoggingAdapter, msg: String): Transformer[ByteString, ByteString] =
-    new Transformer[ByteString, ByteString] {
-      def onNext(element: ByteString) = element :: Nil
-      override def onError(cause: Throwable): Unit = log.error(cause, msg)
+  private[http] def errorLogger(log: LoggingAdapter, msg: String): TransitivePullOp[ByteString, ByteString] =
+    new TransitivePullOp[ByteString, ByteString] {
+      override def onPush(element: ByteString, ctxt: Context[ByteString]): Directive = ctxt.push(element)
+      override def onFailure(cause: Throwable, ctxt: Context[ByteString]): Directive = {
+        log.error(cause, msg)
+        super.onFailure(cause, ctxt)
+      }
     }
 
   private[this] val _identityFunc: Any ⇒ Any = x ⇒ x

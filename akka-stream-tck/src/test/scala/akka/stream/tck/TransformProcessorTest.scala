@@ -4,13 +4,14 @@
 package akka.stream.tck
 
 import akka.stream.MaterializerSettings
-import akka.stream.Transformer
 import akka.stream.impl.ActorBasedFlowMaterializer
 import akka.stream.impl.Ast
 import akka.stream.FlowMaterializer
 import java.util.concurrent.atomic.AtomicInteger
 import org.reactivestreams.Processor
 import org.reactivestreams.Publisher
+import akka.stream.impl.fusing.TransitivePullOp
+import akka.stream.impl.fusing.Context
 
 class TransformProcessorTest extends AkkaIdentityProcessorVerification[Int] {
 
@@ -25,12 +26,12 @@ class TransformProcessorTest extends AkkaIdentityProcessorVerification[Int] {
     val flowName = getClass.getSimpleName + "-" + processorCounter.incrementAndGet()
 
     val mkTransformer = () ⇒
-      new Transformer[Any, Any] {
-        override def onNext(in: Any) = List(in)
+      new TransitivePullOp[Any, Any] {
+        override def onPush(in: Any, ctxt: Context[Any]) = ctxt.push(in)
       }
 
     val processor = materializer.asInstanceOf[ActorBasedFlowMaterializer].processorForNode(
-      Ast.Transform("transform", mkTransformer), flowName, 1)
+      Ast.OpFactory(mkTransformer, "transform"), flowName, 1)
 
     processor.asInstanceOf[Processor[Int, Int]]
   }

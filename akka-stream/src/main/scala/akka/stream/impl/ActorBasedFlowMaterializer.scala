@@ -4,13 +4,10 @@
 package akka.stream.impl
 
 import java.util.concurrent.atomic.AtomicLong
-
 import akka.stream.impl.fusing.{ ActorInterpreter, Op }
-
 import scala.annotation.tailrec
 import scala.collection.immutable
 import scala.concurrent.{ Await, Future }
-
 import akka.actor.Actor
 import akka.actor.ActorCell
 import akka.actor.ActorRef
@@ -23,13 +20,16 @@ import akka.actor.LocalActorRef
 import akka.actor.Props
 import akka.actor.RepointableActorRef
 import akka.actor.SupervisorStrategy
-import akka.stream.{ FlowMaterializer, MaterializerSettings, OverflowStrategy, TimerTransformer, Transformer }
+import akka.stream.{ FlowMaterializer, MaterializerSettings, OverflowStrategy, TimerTransformer }
 import akka.stream.MaterializationException
 import akka.stream.actor.ActorSubscriber
 import akka.stream.impl.Zip.ZipAs
 import akka.stream.scaladsl._
 import akka.pattern.ask
 import org.reactivestreams.{ Processor, Publisher, Subscriber }
+import akka.stream.impl.fusing.TransitivePullOp
+import akka.stream.impl.fusing.Context
+import akka.stream.impl.fusing.Directive
 
 /**
  * INTERNAL API
@@ -38,8 +38,6 @@ private[akka] object Ast {
   sealed trait AstNode {
     def name: String
   }
-
-  case class Transform(name: String, mkTransformer: () ⇒ Transformer[Any, Any]) extends AstNode
 
   case class TimerTransform(name: String, mkTransformer: () ⇒ TimerTransformer[Any, Any]) extends AstNode
 
@@ -203,10 +201,10 @@ case class ActorBasedFlowMaterializer(override val settings: MaterializerSetting
     new MaterializedPipe(source, sourceValue, sink, sinkValue)
   }
 
-  private val identityTransform = Ast.Transform("identity", () ⇒
-    new Transformer[Any, Any] {
-      override def onNext(element: Any) = List(element)
-    })
+  private val identityTransform = Ast.OpFactory(() ⇒
+    new TransitivePullOp[Any, Any] {
+      override def onPush(elem: Any, ctxt: Context[Any]): Directive = ctxt.push(elem)
+    }, "identity")
 
   /**
    * INTERNAL API
@@ -332,7 +330,6 @@ private[akka] object ActorProcessorFactory {
     val settings = materializer.settings
     (op match {
       case OpFactory(mkOps, _)  ⇒ Props(new ActorInterpreter(materializer.settings, mkOps.map(_.apply())))
-      case t: Transform         ⇒ Props(new TransformProcessorImpl(settings, t.mkTransformer()))
       case t: TimerTransform    ⇒ Props(new TimerTransformerProcessorsImpl(settings, t.mkTransformer()))
       case m: MapAsync          ⇒ Props(new MapAsyncProcessorImpl(settings, m.f))
       case m: MapAsyncUnordered ⇒ Props(new MapAsyncUnorderedProcessorImpl(settings, m.f))

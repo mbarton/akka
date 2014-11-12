@@ -3,10 +3,13 @@
  */
 package akka.stream.scaladsl
 
-import akka.stream.{ OverflowStrategy, Transformer }
+import akka.stream.OverflowStrategy
 import akka.stream.FlowMaterializer
 import akka.stream.testkit.AkkaSpec
 import akka.stream.testkit.StreamTestKit.{ PublisherProbe, SubscriberProbe }
+import akka.stream.impl.fusing.TransitivePullOp
+import akka.stream.impl.fusing.Directive
+import akka.stream.impl.fusing.Context
 
 object FlowGraphCompileSpec {
   class Fruit
@@ -18,9 +21,10 @@ class FlowGraphCompileSpec extends AkkaSpec {
 
   implicit val mat = FlowMaterializer()
 
-  def op[In, Out]: () ⇒ Transformer[In, Out] = { () ⇒
-    new Transformer[In, Out] {
-      override def onNext(elem: In) = List(elem.asInstanceOf[Out])
+  def op[In, Out]: () ⇒ TransitivePullOp[In, Out] = { () ⇒
+    new TransitivePullOp[In, Out] {
+      override def onPush(elem: In, ctxt: Context[Out]): Directive =
+        ctxt.push(elem.asInstanceOf[Out])
     }
   }
 

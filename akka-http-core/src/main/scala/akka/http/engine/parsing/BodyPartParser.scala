@@ -8,12 +8,14 @@ import scala.annotation.tailrec
 import scala.collection.mutable.ListBuffer
 import akka.event.LoggingAdapter
 import akka.parboiled2.CharPredicate
-import akka.stream.Transformer
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
 import akka.http.model._
 import akka.http.util._
 import headers._
+import akka.stream.impl.fusing.Context
+import akka.stream.impl.fusing.Directive
+import akka.stream.impl.fusing.DeterministicOp
 
 /**
  * INTERNAL API
@@ -24,7 +26,7 @@ private[http] final class BodyPartParser(defaultContentType: ContentType,
                                          boundary: String,
                                          log: LoggingAdapter,
                                          settings: BodyPartParser.Settings = BodyPartParser.defaultSettings)
-  extends Transformer[ByteString, BodyPartParser.Output] {
+  extends DeterministicOp[ByteString, BodyPartParser.Output] {
   import BodyPartParser._
   import settings._
 
@@ -52,15 +54,34 @@ private[http] final class BodyPartParser(defaultContentType: ContentType,
 
   private[this] val headerParser = HttpHeaderParser(settings, warnOnIllegalHeader) // TODO: prevent re-priming header parser from scratch
   private[this] val result = new ListBuffer[Output] // transformer op is currently optimized for LinearSeqs
+  private[this] var resultIterator: Iterator[Output] = Iterator.empty
   private[this] var state: ByteString ⇒ StateResult = tryParseInitialBoundary
   private[this] var receivedInitialBoundary = false
   private[this] var terminated = false
 
-  override def isComplete = terminated
-
   def warnOnIllegalHeader(errorInfo: ErrorInfo): Unit =
     if (illegalHeaderWarnings) log.warning(errorInfo.withSummaryPrepended("Illegal multipart header").formatPretty)
 
+  override def onPush(input: ByteString, ctxt: Context[Output]): Directive = {
+    resultIterator = onNext(input).iterator
+    if (resultIterator.isEmpty && terminated) ctxt.finish() // FIXME verify usage of terminated
+    else if (resultIterator.isEmpty) ctxt.pull()
+    else ctxt.push(resultIterator.next())
+  }
+
+  override def onPull(ctxt: Context[Output]): Directive = {
+    if (resultIterator.hasNext)
+      ctxt.push(resultIterator.next())
+    else if (isFinishing) {
+      if (terminated || !receivedInitialBoundary) // FIXME verify usage of terminated
+        ctxt.finish()
+      else
+        ctxt.pushAndFinish(ParseError(ErrorInfo("Unexpected end of multipart entity")))
+    } else
+      ctxt.pull()
+  }
+
+  // FIXME need this for the HttpEntity.Strict unmarshaller, would be better to be able to run the Op in a strict interpreter
   def onNext(input: ByteString): List[Output] = {
     result.clear()
     try state(input)
@@ -70,6 +91,12 @@ private[http] final class BodyPartParser(defaultContentType: ContentType,
     }
     result.toList
   }
+
+  // FIXME need this for the HttpEntity.Strict unmarshaller, would be better to be able to run the Op in a strict interpreter
+  def onTermination(): List[BodyPartParser.Output] =
+    if (terminated || !receivedInitialBoundary) Nil else ParseError(ErrorInfo("Unexpected end of multipart entity")) :: Nil
+
+  override def onUpstreamFinish(ctxt: Context[Output]): Directive = ctxt.absorbTermination()
 
   def tryParseInitialBoundary(input: ByteString): StateResult =
     // we don't use boyerMoore here because we are testing for the boundary *without* a
@@ -223,8 +250,6 @@ private[http] final class BodyPartParser(defaultContentType: ContentType,
   def doubleDash(input: ByteString, offset: Int): Boolean =
     byteChar(input, offset) == '-' && byteChar(input, offset + 1) == '-'
 
-  override def onTermination(e: Option[Throwable]): List[BodyPartParser.Output] =
-    if (terminated || !receivedInitialBoundary) Nil else ParseError(ErrorInfo("Unexpected end of multipart entity")) :: Nil
 }
 
 private[http] object BodyPartParser {

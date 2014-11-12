@@ -13,8 +13,8 @@ import scala.concurrent.duration._
 import akka.actor.{ Props, ActorRefFactory, ActorRef }
 import akka.stream.{ TransformerLike, MaterializerSettings }
 import akka.stream.FlowMaterializer
-import akka.stream.impl.{ ActorProcessorFactory, TransformProcessorImpl, StreamSupervisor, ActorBasedFlowMaterializer }
-import akka.stream.impl.Ast.{ Transform, OpFactory, AstNode }
+import akka.stream.impl.{ ActorProcessorFactory, StreamSupervisor, ActorBasedFlowMaterializer }
+import akka.stream.impl.Ast.{ OpFactory, AstNode }
 import akka.stream.testkit.{ StreamTestKit, AkkaSpec }
 import akka.stream.testkit.ChainSetup
 import akka.testkit._
@@ -29,22 +29,6 @@ object FlowSpec {
   val flowNameCounter = new AtomicLong(0)
 
   case class BrokenMessage(msg: String)
-
-  class BrokenTransformProcessorImpl(
-    _settings: MaterializerSettings,
-    transformer: TransformerLike[Any, Any],
-    brokenMessage: Any) extends TransformProcessorImpl(_settings, transformer) {
-
-    import akka.stream.actor.ActorSubscriberMessage._
-
-    override protected[akka] def aroundReceive(receive: Receive, msg: Any) = {
-      msg match {
-        case OnNext(m) if m == brokenMessage ⇒
-          throw new NullPointerException(s"I'm so broken [$m]")
-        case _ ⇒ super.aroundReceive(receive, msg)
-      }
-    }
-  }
 
   class BrokenActorInterpreter(
     _settings: MaterializerSettings,
@@ -72,7 +56,6 @@ object FlowSpec {
 
     override def processorForNode(op: AstNode, flowName: String, n: Int): Processor[Any, Any] = {
       val props = op match {
-        case t: Transform        ⇒ Props(new BrokenTransformProcessorImpl(settings, t.mkTransformer(), brokenMessage))
         case OpFactory(mkOps, _) ⇒ Props(new BrokenActorInterpreter(settings, mkOps.map(_.apply()), brokenMessage)).withDispatcher(settings.dispatcher)
         case o                   ⇒ ActorProcessorFactory.props(this, o)
       }

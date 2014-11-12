@@ -11,7 +11,7 @@ import scala.util.control.NonFatal
 // implement grouped, buffer
 // add recover
 
-trait Op[In, Out, PushD <: Directive, PullD <: Directive, Ctxt <: Context[Out]] {
+trait Op[-In, Out, PushD <: Directive, PullD <: Directive, Ctxt <: Context[Out]] {
   private[fusing] var holding = false
   private[fusing] var allowedToPush = false
   private[fusing] var terminationPending = false

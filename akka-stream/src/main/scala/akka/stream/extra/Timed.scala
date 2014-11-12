@@ -8,9 +8,11 @@ import java.util.concurrent.atomic.AtomicLong
 import scala.concurrent.duration._
 import scala.language.implicitConversions
 import scala.language.existentials
-import akka.stream.Transformer
 import akka.stream.scaladsl.Source
 import akka.stream.scaladsl.Flow
+import akka.stream.impl.fusing.TransitivePullOp
+import akka.stream.impl.fusing.Context
+import akka.stream.impl.fusing.Directive
 
 /**
  * Provides operations needed to implement the `timed` DSL
@@ -99,41 +101,50 @@ object Timed extends TimedOps with TimedIntervalBetweenOps {
     }
   }
 
-  final class StartTimedFlow[T](ctx: TimedFlowContext) extends Transformer[T, T] {
+  final class StartTimedFlow[T](timedContext: TimedFlowContext) extends TransitivePullOp[T, T] {
     private var started = false
 
-    override def onNext(element: T) = {
+    override def onPush(elem: T, ctxt: Context[T]): Directive = {
       if (!started) {
-        ctx.start()
+        timedContext.start()
         started = true
       }
-
-      immutable.Seq(element)
+      ctxt.push(elem)
     }
   }
 
-  final class StopTimed[T](ctx: TimedFlowContext, _onComplete: FiniteDuration ⇒ Unit) extends Transformer[T, T] {
+  final class StopTimed[T](timedContext: TimedFlowContext, _onComplete: FiniteDuration ⇒ Unit) extends TransitivePullOp[T, T] {
 
-    override def cleanup() {
-      val d = ctx.stop()
+    override def onPush(elem: T, ctxt: Context[T]): Directive = ctxt.push(elem)
+
+    override def onFailure(cause: Throwable, ctxt: Context[T]): Directive = {
+      stopTime()
+      ctxt.fail(cause)
+    }
+    override def onUpstreamFinish(ctxt: Context[T]): Directive = {
+      // FIXME is onUpstreamFinish called also for failure?
+      stopTime()
+      ctxt.finish()
+    }
+    private def stopTime() {
+      val d = timedContext.stop()
       _onComplete(d)
     }
 
-    override def onNext(element: T) = immutable.Seq(element)
   }
 
-  final class TimedIntervalTransformer[T](matching: T ⇒ Boolean, onInterval: FiniteDuration ⇒ Unit) extends Transformer[T, T] {
+  final class TimedIntervalTransformer[T](matching: T ⇒ Boolean, onInterval: FiniteDuration ⇒ Unit) extends TransitivePullOp[T, T] {
     private var prevNanos = 0L
     private var matched = 0L
 
-    override def onNext(in: T): immutable.Seq[T] = {
-      if (matching(in)) {
-        val d = updateInterval(in)
+    override def onPush(elem: T, ctxt: Context[T]): Directive = {
+      if (matching(elem)) {
+        val d = updateInterval(elem)
 
         if (matched > 1)
           onInterval(d)
       }
-      immutable.Seq(in)
+      ctxt.push(elem)
     }
 
     private def updateInterval(in: T): FiniteDuration = {

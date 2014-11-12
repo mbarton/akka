@@ -8,7 +8,6 @@ import akka.event.LoggingAdapter
 import akka.stream.io.StreamTcp
 import akka.stream.FlattenStrategy
 import akka.stream.FlowMaterializer
-import akka.stream.Transformer
 import akka.stream.scaladsl._
 import akka.http.engine.parsing.HttpRequestParser
 import akka.http.engine.rendering.{ ResponseRenderingContext, HttpResponseRendererFactory }
@@ -17,6 +16,9 @@ import akka.http.engine.parsing.ParserOutput._
 import akka.http.Http
 import akka.http.util._
 import akka.util.ByteString
+import akka.stream.impl.fusing.Context
+import akka.stream.impl.fusing.Directive
+import akka.stream.impl.fusing.TransitivePullOp
 
 /**
  * INTERNAL API
@@ -84,37 +86,38 @@ private[http] class HttpServerPipeline(settings: ServerSettings, log: LoggingAda
    * If the parser produced a ParserOutput.ParseError the error response is immediately dispatched to downstream.
    */
   def applyApplicationBypass =
-    new Transformer[Any, ResponseRenderingContext] {
+    new TransitivePullOp[Any, ResponseRenderingContext] {
       var applicationResponse: HttpResponse = _
       var requestStart: RequestStart = _
 
-      def onNext(elem: Any) = elem match {
+      override def onPush(elem: Any, ctxt: Context[ResponseRenderingContext]): Directive = elem match {
         case response: HttpResponse ⇒
           requestStart match {
             case null ⇒
               applicationResponse = response
-              Nil
+              ctxt.pull()
             case x: RequestStart ⇒
               requestStart = null
-              dispatch(x, response)
+              ctxt.push(dispatch(x, response))
           }
 
         case requestStart: RequestStart ⇒
           applicationResponse match {
             case null ⇒
               this.requestStart = requestStart
-              Nil
+              ctxt.pull()
             case response ⇒
               applicationResponse = null
-              dispatch(requestStart, response)
+              ctxt.push(dispatch(requestStart, response))
           }
 
-        case ParseError(status, info) ⇒ errorResponse(status, info) :: Nil
+        case ParseError(status, info) ⇒
+          ctxt.push(errorResponse(status, info))
       }
 
-      def dispatch(requestStart: RequestStart, response: HttpResponse): List[ResponseRenderingContext] = {
+      def dispatch(requestStart: RequestStart, response: HttpResponse): ResponseRenderingContext = {
         import requestStart._
-        ResponseRenderingContext(response, method, protocol, closeAfterResponseCompletion) :: Nil
+        ResponseRenderingContext(response, method, protocol, closeAfterResponseCompletion)
       }
 
       def errorResponse(status: StatusCode, info: ErrorInfo): ResponseRenderingContext = {

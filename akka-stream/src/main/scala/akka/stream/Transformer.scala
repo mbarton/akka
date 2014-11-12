@@ -46,15 +46,3 @@ abstract class TransformerLike[-T, +U] {
 
 }
 
-/**
- * General interface for stream transformation.
- *
- * It is possible to keep state in the concrete [[Transformer]] instance with
- * ordinary instance variables. The [[Transformer]] is executed by an actor and
- * therefore you don not have to add any additional thread safety or memory
- * visibility constructs to access the state from the callback methods.
- *
- * @see [[akka.stream.scaladsl.Flow#transform]]
- * @see [[akka.stream.javadsl.Flow#transform]]
- */
-abstract class Transformer[-T, +U] extends TransformerLike[T, U]

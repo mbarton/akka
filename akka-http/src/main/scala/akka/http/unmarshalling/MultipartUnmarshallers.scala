@@ -66,8 +66,10 @@ trait MultipartUnmarshallers {
             FastFuture.successful {
               entity match {
                 case HttpEntity.Strict(ContentType(mediaType: MultipartMediaType, _), data) ⇒
+                  // FIXME Note that here we use onNext and onTermination of the BodyPartParser directly,
+                  // it would be better to be able to run the Op in a strict interpreter (no materialization, no async)
                   val builder = new VectorBuilder[BPS]()
-                  (parser.onNext(data) ++ parser.onTermination(None)) foreach {
+                  (parser.onNext(data) ++ parser.onTermination()) foreach {
                     case BodyPartStart(headers, createEntity) ⇒
                       val entity = createEntity(Source.empty()) match {
                         case x: HttpEntity.Strict ⇒ x

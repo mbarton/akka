@@ -12,9 +12,11 @@ import akka.http.model.headers._
 import akka.http.engine.rendering.RenderSupport._
 import akka.http.util._
 import akka.stream.scaladsl.Source
-import akka.stream.Transformer
 import akka.util.ByteString
 import HttpEntity._
+import akka.stream.impl.fusing.Context
+import akka.stream.impl.fusing.Directive
+import akka.stream.impl.fusing.DeterministicOp
 
 /**
  * INTERNAL API
@@ -24,19 +26,19 @@ private[http] object BodyPartRenderer {
   def streamed(boundary: String,
                nioCharset: Charset,
                partHeadersSizeHint: Int,
-               log: LoggingAdapter): Transformer[Multipart.BodyPart, Source[ChunkStreamPart]] =
-    new Transformer[Multipart.BodyPart, Source[ChunkStreamPart]] {
+               log: LoggingAdapter): DeterministicOp[Multipart.BodyPart, Source[ChunkStreamPart]] =
+    new DeterministicOp[Multipart.BodyPart, Source[ChunkStreamPart]] {
       var firstBoundaryRendered = false
 
-      def onNext(bodyPart: Multipart.BodyPart): List[Source[ChunkStreamPart]] = {
+      override def onPush(bodyPart: Multipart.BodyPart, ctxt: Context[Source[ChunkStreamPart]]): Directive = {
         val r = new CustomCharsetByteStringRendering(nioCharset, partHeadersSizeHint)
 
-        def bodyPartChunks(data: Source[ByteString]): List[Source[ChunkStreamPart]] = {
+        def bodyPartChunks(data: Source[ByteString]): Source[ChunkStreamPart] = {
           val entityChunks = data.map[ChunkStreamPart](Chunk(_))
-          (Source(Chunk(r.get) :: Nil) ++ entityChunks) :: Nil
+          Source(Chunk(r.get) :: Nil) ++ entityChunks
         }
 
-        def completePartRendering(): List[Source[ChunkStreamPart]] =
+        def completePartRendering(): Source[ChunkStreamPart] =
           bodyPart.entity match {
             case x if x.isKnownEmpty       ⇒ chunkStream(r.get)
             case Strict(_, data)           ⇒ chunkStream((r ~~ data).get)
@@ -48,18 +50,26 @@ private[http] object BodyPartRenderer {
         firstBoundaryRendered = true
         renderEntityContentType(r, bodyPart.entity)
         renderHeaders(r, bodyPart.headers, log)
-        completePartRendering()
+        ctxt.push(completePartRendering())
       }
 
-      override def onTermination(e: Option[Throwable]): List[Source[ChunkStreamPart]] =
-        if (e.isEmpty && firstBoundaryRendered) {
+      override def onPull(ctxt: Context[Source[ChunkStreamPart]]): Directive = {
+        if (isFinishing && firstBoundaryRendered) {
+          // FIXME is this called also when error occured?
           val r = new ByteStringRendering(boundary.length + 4)
           renderFinalBoundary(r, boundary)
-          chunkStream(r.get)
-        } else Nil
+          ctxt.pushAndFinish(chunkStream(r.get))
+        } else if (isFinishing)
+          ctxt.finish()
+        else
+          ctxt.pull()
+      }
+
+      override def onUpstreamFinish(ctxt: Context[Source[ChunkStreamPart]]): Directive = ctxt.absorbTermination()
 
       private def chunkStream(byteString: ByteString) =
-        Source[ChunkStreamPart](Chunk(byteString) :: Nil) :: Nil
+        Source[ChunkStreamPart](Chunk(byteString) :: Nil)
+
     }
 
   def strict(parts: immutable.Seq[Multipart.BodyPart.Strict], boundary: String, nioCharset: Charset,

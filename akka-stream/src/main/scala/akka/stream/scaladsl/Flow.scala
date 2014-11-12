@@ -5,7 +5,7 @@ package akka.stream.scaladsl
 
 import akka.stream.impl.Ast._
 import akka.stream.impl.fusing
-import akka.stream.{ TimerTransformer, Transformer, OverflowStrategy }
+import akka.stream.{ TimerTransformer, TransformerLike, OverflowStrategy }
 import akka.util.Collections.EmptyImmutableSeq
 import scala.collection.immutable
 import scala.concurrent.duration.{ Duration, FiniteDuration }
@@ -13,6 +13,9 @@ import scala.concurrent.Future
 import scala.language.higherKinds
 import akka.stream.FlowMaterializer
 import akka.stream.FlattenStrategy
+import akka.stream.impl.fusing.Op
+import akka.stream.impl.fusing.Directive
+import akka.stream.impl.fusing.Context
 
 /**
  * A `Flow` is a set of stream processing steps that has one open input and one open output.
@@ -218,14 +221,14 @@ trait FlowOps[+Out] {
     timerTransform("dropWithin", () ⇒ new TimerTransformer[Out, Out] {
       scheduleOnce(DropWithinTimerKey, d)
 
-      var delegate: Transformer[Out, Out] =
-        new Transformer[Out, Out] {
+      var delegate: TransformerLike[Out, Out] =
+        new TransformerLike[Out, Out] {
           def onNext(in: Out) = Nil
         }
 
       def onNext(in: Out) = delegate.onNext(in)
       def onTimer(timerKey: Any) = {
-        delegate = identityTransformer.asInstanceOf[Transformer[Out, Out]]
+        delegate = identityTransformer.asInstanceOf[TransformerLike[Out, Out]]
         Nil
       }
     })
@@ -256,12 +259,12 @@ trait FlowOps[+Out] {
     timerTransform("takeWithin", () ⇒ new TimerTransformer[Out, Out] {
       scheduleOnce(TakeWithinTimerKey, d)
 
-      var delegate: Transformer[Out, Out] = identityTransformer.asInstanceOf[Transformer[Out, Out]]
+      var delegate: TransformerLike[Out, Out] = identityTransformer.asInstanceOf[TransformerLike[Out, Out]]
 
       def onNext(in: Out) = delegate.onNext(in)
       override def isComplete = delegate.isComplete
       def onTimer(timerKey: Any) = {
-        delegate = takeCompletedTransformer.asInstanceOf[Transformer[Out, Out]]
+        delegate = takeCompletedTransformer.asInstanceOf[TransformerLike[Out, Out]]
         Nil
       }
     })
@@ -309,30 +312,10 @@ trait FlowOps[+Out] {
     andThen(OpFactory(() ⇒ fusing.Buffer(size, overflowStrategy), "buffer"))
   }
 
-  /**
-   * Generic transformation of a stream: for each element the [[akka.stream.Transformer#onNext]]
-   * function is invoked, expecting a (possibly empty) sequence of output elements
-   * to be produced.
-   * After handing off the elements produced from one input element to the downstream
-   * subscribers, the [[akka.stream.Transformer#isComplete]] predicate determines whether to end
-   * stream processing at this point; in that case the upstream subscription is
-   * canceled. Before signaling normal completion to the downstream subscribers,
-   * the [[akka.stream.Transformer#onTermination]] function is invoked to produce a (possibly empty)
-   * sequence of elements in response to the end-of-stream event.
-   *
-   * [[akka.stream.Transformer#onError]] is called when failure is signaled from upstream.
-   *
-   * After normal completion or error the [[akka.stream.Transformer#cleanup]] function is called.
-   *
-   * It is possible to keep state in the concrete [[akka.stream.Transformer]] instance with
-   * ordinary instance variables. The [[akka.stream.Transformer]] is executed by an actor and
-   * therefore you do not have to add any additional thread safety or memory
-   * visibility constructs to access the state from the callback methods.
-   *
-   * Note that you can use [[#timerTransform]] if you need support for scheduled events in the transformer.
-   */
-  def transform[T](name: String, mkTransformer: () ⇒ Transformer[Out, T]): Repr[T] = {
-    andThen(Transform(name, mkTransformer.asInstanceOf[() ⇒ Transformer[Any, Any]]))
+  // FIXME docs
+  def transform[T, PushD <: Directive, PullD <: Directive](
+    name: String, mkTransformer: () ⇒ Op[Out, T, PushD, PullD, Context[T]]): Repr[T] = {
+    andThen(OpFactory(mkTransformer, name))
   }
 
   /**
@@ -423,12 +406,12 @@ private[scaladsl] object FlowOps {
   private case object DropWithinTimerKey
   private case object GroupedWithinTimerKey
 
-  private val takeCompletedTransformer: Transformer[Any, Any] = new Transformer[Any, Any] {
+  private val takeCompletedTransformer: TransformerLike[Any, Any] = new TransformerLike[Any, Any] {
     override def onNext(elem: Any) = Nil
     override def isComplete = true
   }
 
-  private val identityTransformer: Transformer[Any, Any] = new Transformer[Any, Any] {
+  private val identityTransformer: TransformerLike[Any, Any] = new TransformerLike[Any, Any] {
     override def onNext(elem: Any) = List(elem)
   }
 }

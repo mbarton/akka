@@ -9,11 +9,13 @@ import scala.annotation.tailrec
 import akka.event.LoggingAdapter
 import akka.util.ByteString
 import akka.stream.scaladsl.Source
-import akka.stream.Transformer
 import akka.http.model._
 import akka.http.util._
 import RenderSupport._
 import headers._
+import akka.stream.impl.fusing.Context
+import akka.stream.impl.fusing.Directive
+import akka.stream.impl.fusing.TransitivePullOp
 
 /**
  * INTERNAL API
@@ -24,9 +26,9 @@ private[http] class HttpRequestRendererFactory(userAgentHeader: Option[headers.`
 
   def newRenderer: HttpRequestRenderer = new HttpRequestRenderer
 
-  final class HttpRequestRenderer extends Transformer[RequestRenderingContext, Source[ByteString]] {
+  final class HttpRequestRenderer extends TransitivePullOp[RequestRenderingContext, Source[ByteString]] {
 
-    def onNext(ctx: RequestRenderingContext): List[Source[ByteString]] = {
+    override def onPush(ctx: RequestRenderingContext, opCtxt: Context[Source[ByteString]]): Directive = {
       val r = new ByteStringRendering(requestHeaderSizeHint)
       import ctx.request._
 
@@ -103,15 +105,15 @@ private[http] class HttpRequestRendererFactory(userAgentHeader: Option[headers.`
         r ~~ CrLf
       }
 
-      def completeRequestRendering(): List[Source[ByteString]] =
+      def completeRequestRendering(): Source[ByteString] =
         entity match {
           case x if x.isKnownEmpty ⇒
             renderContentLength(0)
-            Source(r.get :: Nil) :: Nil
+            Source(r.get :: Nil)
 
           case HttpEntity.Strict(_, data) ⇒
             renderContentLength(data.length)
-            Source(r.get :: data :: Nil) :: Nil
+            Source(r.get :: data :: Nil)
 
           case HttpEntity.Default(_, contentLength, data) ⇒
             renderContentLength(contentLength)
@@ -126,7 +128,7 @@ private[http] class HttpRequestRendererFactory(userAgentHeader: Option[headers.`
       renderRequestLine()
       renderHeaders(headers.toList)
       renderEntityContentType(r, entity)
-      completeRequestRendering()
+      opCtxt.push(completeRequestRendering())
     }
   }
 }
