@@ -25,6 +25,7 @@ import org.reactivestreams.{ Processor, Subscriber, Publisher }
 object FlowSpec {
   class Fruit
   class Apple extends Fruit
+  val apples = () ⇒ Iterator.continually(new Apple)
 
   val flowNameCounter = new AtomicLong(0)
 
@@ -328,11 +329,11 @@ class FlowSpec extends AkkaSpec(ConfigFactory.parseString("akka.actor.debug.rece
     }
 
     "be covariant" in {
-      val f1: Source[Fruit] = Source[Fruit](() ⇒ Some(new Apple))
-      val p1: Publisher[Fruit] = Source[Fruit](() ⇒ Some(new Apple)).runWith(Sink.publisher)
-      val f2: Source[Source[Fruit]] = Source[Fruit](() ⇒ Some(new Apple)).splitWhen(_ ⇒ true)
-      val f3: Source[(Boolean, Source[Fruit])] = Source[Fruit](() ⇒ Some(new Apple)).groupBy(_ ⇒ true)
-      val f4: Source[(immutable.Seq[Fruit], Source[Fruit])] = Source[Fruit](() ⇒ Some(new Apple)).prefixAndTail(1)
+      val f1: Source[Fruit] = Source[Fruit](apples)
+      val p1: Publisher[Fruit] = Source[Fruit](apples).runWith(Sink.publisher)
+      val f2: Source[Source[Fruit]] = Source[Fruit](apples).splitWhen(_ ⇒ true)
+      val f3: Source[(Boolean, Source[Fruit])] = Source[Fruit](apples).groupBy(_ ⇒ true)
+      val f4: Source[(immutable.Seq[Fruit], Source[Fruit])] = Source[Fruit](apples).prefixAndTail(1)
       val d1: Flow[String, Source[Fruit]] = Flow[String].map(_ ⇒ new Apple).splitWhen(_ ⇒ true)
       val d2: Flow[String, (Boolean, Source[Fruit])] = Flow[String].map(_ ⇒ new Apple).groupBy(_ ⇒ true)
       val d3: Flow[String, (immutable.Seq[Apple], Source[Fruit])] = Flow[String].map(_ ⇒ new Apple).prefixAndTail(1)

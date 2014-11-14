@@ -27,7 +27,7 @@ abstract class AkkaSubscriberBlackboxVerification[T](val system: ActorSystem, en
   }
 
   def this(printlnDebug: Boolean) {
-    this(ActorSystem(classOf[IterablePublisherTest].getSimpleName, AkkaSpec.testConf), printlnDebug)
+    this(ActorSystem("IterablePublisherTest", AkkaSpec.testConf), printlnDebug)
   }
 
   def this() {
@@ -44,7 +44,7 @@ abstract class AkkaSubscriberWhiteboxVerification[T](val system: ActorSystem, en
   }
 
   def this(printlnDebug: Boolean) {
-    this(ActorSystem(classOf[IterablePublisherTest].getSimpleName, AkkaSpec.testConf), printlnDebug)
+    this(ActorSystem("IterablePublisherTest", AkkaSpec.testConf), printlnDebug)
   }
 
   def this() {

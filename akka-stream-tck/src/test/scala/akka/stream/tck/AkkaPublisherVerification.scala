@@ -27,7 +27,7 @@ abstract class AkkaPublisherVerification[T](val system: ActorSystem, env: TestEn
   }
 
   def this(printlnDebug: Boolean) {
-    this(ActorSystem(classOf[IterablePublisherTest].getSimpleName, AkkaSpec.testConf), printlnDebug)
+    this(ActorSystem("IterablePublisherTest", AkkaSpec.testConf), printlnDebug)
   }
 
   def this() {

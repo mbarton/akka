@@ -465,6 +465,7 @@ private[akka] object ActorProcessorFactory {
       case Conflate(s, f)       ⇒ Props(new ActorInterpreter(settings, List(fusing.Conflate(s, f))))
       case Buffer(n, s)         ⇒ Props(new ActorInterpreter(settings, List(fusing.Buffer(n, s))))
       case MapConcat(f)         ⇒ Props(new ActorInterpreter(settings, List(fusing.MapConcat(f))))
+      case Operate(mkOp)        ⇒ Props(new ActorInterpreter(settings, List(mkOp())))
       case MapAsync(f)          ⇒ Props(new MapAsyncProcessorImpl(settings, f))
       case MapAsyncUnordered(f) ⇒ Props(new MapAsyncUnorderedProcessorImpl(settings, f))
       case Grouped(n)           ⇒ Props(new ActorInterpreter(settings, List(fusing.Grouped(n))))
